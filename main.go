@@ -293,12 +293,24 @@ func run(quit context.Context, done chan error) {
 
 	sophie := &Sophie{str: str, id: id}
 
+	var lead int32
 	lockquit, lockcancel := context.WithTimeout(context.TODO(), time.Minute)
 
-	sophie.locker = dlock.NewK8sLock(id, "testqrm")
+	sophie.locker = dlock.NewK8sLock(id, "testqrm", dlock.WithLeaseDuration(time.Second*30),
+		dlock.WithStartCallback(func(ctx context.Context) {
+			atomic.StoreInt32(&lead, 1)
+			klog.Info("got the lock")
+		}),
+		dlock.WithNewLeaderCallback(func(identity string) {
+			if identity == id {
+				klog.Infof("got the lock: %v", identity)
+			}
+		}),
+	)
 
-	leader := sophie.locker.Lock(lockquit)
-	if leader == nil {
+	sophie.locker.Lock(lockquit)
+	leader := atomic.LoadInt32(&lead) == 1
+	if !leader {
 		klog.Infof("give up leadership attempt: %v", id)
 		lockcancel()
 	}
@@ -327,7 +339,7 @@ func run(quit context.Context, done chan error) {
 		klog.Info("node is already member of cluster, skip determining join addresses")
 	}
 
-	if err := str.Open(leader == nil); err != nil {
+	if err := str.Open(leader); err != nil {
 		klog.Fatalf("failed to open store: %s", err.Error())
 	}
 
@@ -350,7 +362,7 @@ func run(quit context.Context, done chan error) {
 					go func() { // attempt infinite lock, till death
 						klog.Infof("[next] attempt next lock: %v", id)
 						nxtquit, _ := context.WithCancel(quit)
-						sophie.tryLock(nxtquit)
+						sophie.locker.Lock(nxtquit)
 					}()
 
 					klog.Infof("leader (from actual Raft obj): %v, me=true", m.Raft.Leader())
@@ -408,7 +420,7 @@ func run(quit context.Context, done chan error) {
 	}
 
 	// Execute any requested join operation.
-	if leader != nil {
+	if !leader {
 		for _, join := range joins {
 			if fmt.Sprintf("http://%v:8080", id) == join {
 				klog.Infof("skip, don't join to self: %v", id)
