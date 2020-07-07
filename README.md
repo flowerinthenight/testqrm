@@ -1,1 +1,1 @@
-Testbed for implementing Raft algorithm to a Kubernetes deployment (not stable).
+Testbed for implementing [Raft algorithm](https://raft.github.io/) to a Kubernetes deployment (not stable).
