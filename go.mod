@@ -4,12 +4,12 @@ go 1.14
 
 require (
 	github.com/PuerkitoBio/goquery v1.5.1 // indirect
+	github.com/flowerinthenight/dlock v0.0.0-20200707092122-a0e8f1144979
 	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b
 	github.com/hashicorp/raft v1.1.2
 	github.com/rqlite/rqlite v4.6.0+incompatible
 	github.com/spf13/cobra v1.0.0
 	github.com/spf13/pflag v1.0.5
-	golang.org/x/net v0.0.0-20200324143707-d3edc9973b7e // indirect
 	k8s.io/api v0.18.5 // indirect
 	k8s.io/apimachinery v0.18.5
 	k8s.io/client-go v11.0.0+incompatible

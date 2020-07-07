@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/flowerinthenight/dlock"
 	"github.com/golang/glog"
 	"github.com/hashicorp/raft"
 	"github.com/rqlite/rqlite/cluster"
@@ -31,8 +32,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/leaderelection"
-	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/klog/v2"
 )
 
@@ -67,6 +66,7 @@ func k8sclient() *kubernetes.Clientset {
 }
 
 type Sophie struct {
+	locker        *dlock.K8sLock
 	str           *store.Store
 	id            string
 	nodeCleanupOn int32
@@ -81,45 +81,45 @@ type stats struct {
 	} `json:"store"`
 }
 
-func (s *Sophie) tryLock(ctx context.Context) bool {
-	client := k8sclient()
-	var leader int32
+// func (s *Sophie) tryLock(ctx context.Context) bool {
+// 	client := k8sclient()
+// 	var leader int32
 
-	go func() {
-		// We use the Lease lock type since edits to Leases are less common
-		// and fewer objects in the cluster watch "all Leases".
-		lock := &resourcelock.LeaseLock{
-			LeaseMeta: metav1.ObjectMeta{
-				Name:      "testqrm",
-				Namespace: "default",
-			},
-			Client:     client.CoordinationV1(),
-			LockConfig: resourcelock.ResourceLockConfig{Identity: s.id},
-		}
+// 	go func() {
+// 		// We use the Lease lock type since edits to Leases are less common
+// 		// and fewer objects in the cluster watch "all Leases".
+// 		lock := &resourcelock.LeaseLock{
+// 			LeaseMeta: metav1.ObjectMeta{
+// 				Name:      "testqrm",
+// 				Namespace: "default",
+// 			},
+// 			Client:     client.CoordinationV1(),
+// 			LockConfig: resourcelock.ResourceLockConfig{Identity: s.id},
+// 		}
 
-		// Start the leader election code loop.
-		leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-			Lock:            lock,
-			ReleaseOnCancel: true,
-			LeaseDuration:   30 * time.Second,
-			RenewDeadline:   15 * time.Second,
-			RetryPeriod:     5 * time.Second,
-			Callbacks: leaderelection.LeaderCallbacks{
-				OnStartedLeading: func(ctx context.Context) { atomic.StoreInt32(&leader, 1) },
-				OnStoppedLeading: func() {},
-				OnNewLeader: func(identity string) {
-					if identity == s.id {
-						klog.Infof("%v just got the lock", identity)
-					}
-				},
-			},
-		})
-	}()
+// 		// Start the leader election code loop.
+// 		leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+// 			Lock:            lock,
+// 			ReleaseOnCancel: true,
+// 			LeaseDuration:   30 * time.Second,
+// 			RenewDeadline:   15 * time.Second,
+// 			RetryPeriod:     5 * time.Second,
+// 			Callbacks: leaderelection.LeaderCallbacks{
+// 				OnStartedLeading: func(ctx context.Context) { atomic.StoreInt32(&leader, 1) },
+// 				OnStoppedLeading: func() {},
+// 				OnNewLeader: func(identity string) {
+// 					if identity == s.id {
+// 						klog.Infof("%v just got the lock", identity)
+// 					}
+// 				},
+// 			},
+// 		})
+// 	}()
 
-	quit, _ := context.WithCancel(ctx)
-	<-quit.Done()
-	return atomic.LoadInt32(&leader) == 1
-}
+// 	quit, _ := context.WithCancel(ctx)
+// 	<-quit.Done()
+// 	return atomic.LoadInt32(&leader) == 1
+// }
 
 func (s *Sophie) nodeCleanup(ctx context.Context) {
 	if !s.str.IsLeader() || atomic.LoadInt32(&s.nodeCleanupOn) == 1 {
@@ -294,8 +294,11 @@ func run(quit context.Context, done chan error) {
 	sophie := &Sophie{str: str, id: id}
 
 	lockquit, lockcancel := context.WithTimeout(context.TODO(), time.Minute)
-	leader := sophie.tryLock(lockquit)
-	if !leader {
+
+	sophie.locker = dlock.NewK8sLock(id, "testqrm")
+
+	leader := sophie.locker.Lock(lockquit)
+	if leader == nil {
 		klog.Infof("give up leadership attempt: %v", id)
 		lockcancel()
 	}
@@ -324,7 +327,7 @@ func run(quit context.Context, done chan error) {
 		klog.Info("node is already member of cluster, skip determining join addresses")
 	}
 
-	if err := str.Open(leader); err != nil {
+	if err := str.Open(leader == nil); err != nil {
 		klog.Fatalf("failed to open store: %s", err.Error())
 	}
 
@@ -405,7 +408,7 @@ func run(quit context.Context, done chan error) {
 	}
 
 	// Execute any requested join operation.
-	if !leader {
+	if leader != nil {
 		for _, join := range joins {
 			if fmt.Sprintf("http://%v:8080", id) == join {
 				klog.Infof("skip, don't join to self: %v", id)
